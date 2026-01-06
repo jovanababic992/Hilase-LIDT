@@ -1,0 +1,65 @@
+{
+  "lab_image": "assets/images/lab.jpg",
+  "logo_title": "assets/logos/logo_white.svg",
+  "logo_inner": "assets/logos/logo_white.svg",
+
+  "ombre_left": "#00afee",
+  "ombre_right": "#64bb2f",
+  "ombre_alpha": 0.8,
+  "fade_alpha_255": 160,
+  "banner_ratio": 0.35,
+
+  "title": "Laser-Induced Damage Threshold Test (LIDT) Report",
+  "sample": "FS-AR-1064-S1",
+  "standard": "ISO 21254",
+
+  "prepared_by": [
+    "Ing. Martin Mydlář (martin.mydlar@hilase.cz)"
+  ],
+  "approved_by": "Name Surname (name1@example.com)",
+
+  "institute": "HiLASE Centre, Institute of Physics ASCR",
+  "inst_address": "Za Radnici 828, 252 41 Dolni Brezany, Czech Republic",
+
+  "customer": "Customer Company",
+  "cust_address": "Za Radnici 828, 252 41 Dolni Brezany, Czech Republic",
+  "cust_contact": "contact@customer.com",
+
+
+  "margins": {
+    "left_mm": 16,
+    "right_mm": 16,
+    "top_mm": 16,
+    "bottom_mm": 20
+  },
+
+  "copyright": "© 2025 HiLASE Centre",
+
+  "sections": [
+    {
+      "title": "Report Identification",
+      "items": [
+        
+      ]
+    },
+    {
+      "title": "Sample Information",
+      "items": [
+        ["Sample ID", "FS-AR-1064-S1"],
+        ["Description", "Fused silica substrate, AR coating @ 1064 nm, 45° AOI"],
+        ["Date Received", "2025-09-12"],
+        ["Preparation", "Cleaned with IPA, nitrogen-dried"]
+      ]
+    },
+    {
+      "title": "Test Identification",
+      "items": [
+        ["Procedure", "ISO 21254 (S-on-1 method)"],
+        ["Objective", "Determine 0%, 50%, and 100% LIDT for AR coating"],
+        ["Sites / Pulses per Site", "50 sites / 100 pulses"],
+        ["Damage Detection", "In-situ scattered light + optical microscopy"]
+      ],
+      "notes": "Substrate edges visually inspected; no chips or scratches observed."
+      }
+  ]
+}
