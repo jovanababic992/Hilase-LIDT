@@ -1,3 +1,7 @@
+from pathlib import Path
+
+_ASSETS = Path(__file__).resolve().parents[1] / "assets" / "images"
+
 LASER_PRESETS = {
     "manual": {
         "label": "Manual entry",
@@ -34,9 +38,9 @@ LASER_PRESETS = {
         "images": {
             "layout": "template3",
             "items": [
-                {"path": r"C:\Users\jovana.babic\OneDrive - Centrum HiLASE\Desktop\LIDT REPORT\report-generator\assets\images\laser1.png"},
-                {"path": r"C:\Users\jovana.babic\OneDrive - Centrum HiLASE\Desktop\LIDT REPORT\report-generator\assets\images\laser2.png"},
-                {"path": r"C:\Users\jovana.babic\OneDrive - Centrum HiLASE\Desktop\LIDT REPORT\report-generator\assets\images\laser3.png"}
+                {"path": str(_ASSETS / "laser1.png")},
+                {"path": str(_ASSETS / "laser2.png")},
+                {"path": str(_ASSETS / "laser3.png")}
             ],
             "overlay_color": "black",
             "caption": "Spatial and temporal beam profile and the emission spectra at the selected wavelength.",
@@ -60,6 +64,16 @@ LASER_PRESETS = {
             "beam_diameter_1e2": "",
             "beam_delivery": "",
         },
+        "images": {
+            "layout": "template3",
+            "items": [
+                {"path": str(_ASSETS / "profile.png")},
+                {"path": str(_ASSETS / "x_cross_section.png")},
+                {"path": str(_ASSETS / "pointing_stability.png")}
+            ],
+            "caption": "Spatial and temporal beam profile and the emission spectra at the selected wavelength.",
+            "width_pct": 0.7,
+        }
     },
 
     "perla_b": {

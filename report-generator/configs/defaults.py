@@ -11,8 +11,10 @@ DEFAULT_CONTEXT = {
     "logo_inner": str(ROOT / "assets/logos/logo_white.svg"),
 
   
-    "ombre_left": "#00afee",
-    "ombre_right": "#64bb2f",
+    # "ombre_left": "#00afee",
+    # "ombre_right": "#64bb2f",
+    "ombre_left": "#0a714e",
+    "ombre_right": "#0a714e",
     "ombre_alpha": 0.8,
     "fade_alpha_255": 160,
     "banner_ratio": 0.35,

@@ -12,6 +12,8 @@ from reportlab.graphics import renderPDF
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from pathlib import Path
+import logging
+logging.getLogger("svglib").setLevel(logging.ERROR)
 
 
 FONT_PATH = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "DejaVuSans.ttf"
@@ -126,16 +128,9 @@ def _draw_header_footer_svg_ombre(
     c.drawRightString(page_w - right_margin, footer_y, f"Page {c.getPageNumber()}")
 
 # --- New simple section drawing function ---
-def _draw_overlay_letter(c, letter, x, y, font_size=10, color="white"):
-    """
-    Draw just a bold letter (no background badge).
-    (x, y) is the top-left anchor inside the image.
-    color: 'white' or 'black'
-    """
-    if color not in ("white", "black"):
-        color = "white"  # fallback
+def _draw_overlay_letter(c, letter, x, y, font_size=10):
     c.setFont("Helvetica-Bold", font_size)
-    c.setFillColor(colors.HexColor("#FFFFFF" if color == "white" else "#111827"))
+    c.setFillColor(colors.HexColor("#111827"))
     # Draw with a slight downward shift so top aligns more naturally
     c.drawString(x, y - font_size, letter)
 
@@ -149,9 +144,7 @@ def _load_image_flatten_white(path):
         return white_bg.convert("RGB")
     else:
         return im.convert("RGB")
-
-
-
+    
 def _draw_image_template(
     c,
     images_spec,
@@ -164,388 +157,519 @@ def _draw_image_template(
     right_margin_mm=16,
     min_bottom_gap_pt=20,
     width_pct=0.8,
-    figure_number=None
+    figure_number=None,
+    dpi=300
 ):
-    """
-    Adds optional transparency flatten flag:
-      images_spec['flatten_alpha_to_white'] = True/False (default False)
-    If True: transparent pixels become white; if False: current behavior (transparent -> black).
-    """
-    if not images_spec:
+
+
+    if not images_spec or "layout" not in images_spec:
         return start_y, False
 
-    if images_spec.get("layout") == "template1":
-        items = images_spec.get("items") or []
-        if not items:
-            return start_y, False
+    layout = images_spec["layout"]
+    items = images_spec.get("items", [])
+    if not items:
+        return start_y, False
 
-        img_path = items[0].get("path")
-        if not img_path or (not isinstance(img_path, bytes) and not os.path.exists(img_path)):
-            return start_y, False
+    # ---------------------------
+    # Common setup
+    # ---------------------------
+    left_x = left_margin_mm * mm
+    right_x = page_w - right_margin_mm * mm
+    usable_w = right_x - left_x
+    FOOTER_SAFE_PT = 22
+    bottom_limit = margins["bottom_mm"] * mm + min_bottom_gap_pt + FOOTER_SAFE_PT
 
-        caption_user = images_spec.get("caption", "").strip()
-        overlay_color = images_spec.get("overlay_color", "white")
-        width_pct = max(0.1, min(width_pct, 1.0))
+    gap = 8
+    MIN_SCALE = 0.55
+    IMAGE_CAPTION_GAP = 20
 
-        # Figure caption
-        if figure_number is not None:
-            caption_final = f"Figure {figure_number}: {caption_user}" if caption_user else f"Figure {figure_number}"
-        else:
-            caption_final = caption_user
+    caption_user = images_spec.get("caption", "").strip()
+    caption_final = (
+        f"Figure {figure_number}: {caption_user}"
+        if figure_number and caption_user
+        else f"Figure {figure_number}" if figure_number else caption_user
+    )
+    caption_h = 14 if caption_final else 0
 
-        left_x = left_margin_mm * mm
-        right_x = page_w - right_margin_mm * mm
-        usable_w = right_x - left_x
+    def new_page():
+        nonlocal start_y
+        c.showPage()
+        start_y = on_new_page(c)
 
-        img_w = usable_w * width_pct
+    #  STACK layout (variable number of images, one per row, each with own caption/notes) 
+    if layout == "stack":
+        item_gap       = 24
+        cap_gap        = 10
+        note_gap       = 8
+        cap_font_size  = 10
+        note_font_size = 9
+        MIN_IMG_H      = 100
+        MAX_PER_PAGE   = 2
+        full_page_avail = page_h - (margins["top_mm"] + margins["bottom_mm"]) * mm - 60
+
+        # Filter valid items upfront
+        valid_items = [it for it in items if it.get("path") and os.path.exists(it["path"])]
+        if not valid_items:
+            return start_y, 0
+
+        def _overhead(item):
+            cap_h  = (cap_gap  + cap_font_size  + 4) if item.get("caption", "").strip() else 0
+            note_h = (note_gap + note_font_size + 3) if item.get("notes",   "").strip() else 0
+            return cap_h + note_h + item_gap
+
+        overheads = [_overhead(it) for it in valid_items]
+        n         = len(valid_items)
+        y         = start_y
+        drawn_count = 0
+        i           = 0
+
+        while i < n:
+            avail = y - bottom_limit
+
+            # --- decide how many images go on this page (1 or 2) ---
+            draw_h = None
+            batch  = 0
+
+            # try fitting 2
+            if i + 1 < n:
+                oh2 = overheads[i] + overheads[i + 1]
+                h2  = (avail - oh2) / 2
+                h2  = min(h2, full_page_avail * 0.40)
+                if h2 >= MIN_IMG_H:
+                    draw_h = h2
+                    batch  = 2
+
+            # try fitting 1
+            if batch == 0:
+                oh1 = overheads[i]
+                h1  = avail - oh1
+                h1  = min(h1, full_page_avail * 0.55)
+                if h1 >= MIN_IMG_H:
+                    draw_h = h1
+                    batch  = 1
+
+            # nothing fits — new page
+            if batch == 0:
+                new_page()
+                y = start_y
+                continue
+
+            # --- draw the batch at uniform draw_h ---
+            for j in range(batch):
+                item   = valid_items[i + j]
+                path   = item["path"]
+                img    = Image.open(path)
+                iw, ih = img.size
+
+                dh = draw_h
+                dw = dh * (iw / ih)
+                if dw > usable_w * width_pct:
+                    dw = usable_w * width_pct
+                    dh = dw * (ih / iw)
+
+                img_x  = left_x + (usable_w - dw) / 2
+                reader = _pil_to_reader(_load_image_flatten_white(path))
+                c.drawImage(reader, img_x, y - dh, width=dw, height=dh)
+                y -= dh
+                drawn_count += 1
+
+                item_caption = item.get("caption", "").strip()
+                if item_caption:
+                    y -= cap_gap
+                    fig_label = f"Figure {(figure_number or 0) + drawn_count - 1}: {item_caption}"
+                    c.setFont("Helvetica-Oblique", cap_font_size)
+                    c.setFillColor(colors.HexColor("#111827"))
+                    cap_lines = _wrap_text(c, fig_label, "Helvetica-Oblique", cap_font_size, usable_w)
+                    if len(cap_lines) == 1:
+                        tw = c.stringWidth(cap_lines[0], "Helvetica-Oblique", cap_font_size)
+                        c.drawString(left_x + (usable_w - tw) / 2, y, cap_lines[0])
+                        y -= cap_font_size + 4
+                    else:
+                        for line in cap_lines:
+                            c.drawString(img_x, y, line)
+                            y -= cap_font_size + 4
+
+                item_notes = item.get("notes", "").strip()
+                if item_notes:
+                    y -= note_gap
+                    c.setFont("Helvetica-Bold", note_font_size)
+                    c.setFillColor(colors.HexColor("#111827"))
+                    prefix   = "Comment: "
+                    prefix_w = c.stringWidth(prefix, "Helvetica-Bold", note_font_size)
+                    c.drawString(img_x, y, prefix)
+                    c.setFont("Helvetica", note_font_size)
+                    for line in _wrap_text(c, item_notes, "Helvetica", note_font_size, usable_w - prefix_w):
+                        c.drawString(img_x + prefix_w, y, line)
+                        y -= note_font_size + 3
+                        prefix_w = 0
+
+                y -= item_gap
+
+            i += batch
+
+        return y, drawn_count
+
+    blocks = []
+
+    # ---------------------------
+    # TEMPLATE 1 — single image (adaptive per image)
+    # ---------------------------
+    if layout == "template1":
+        img_w = usable_w * max(0.1, min(width_pct, 1.0))
         img_x = left_x + (usable_w - img_w) / 2
 
-        caption_h = 12 if caption_final else 0
-        bottom_limit = margins["bottom_mm"] * mm + min_bottom_gap_pt
+        max_h = start_y - bottom_limit - caption_h - IMAGE_CAPTION_GAP
+        if max_h < 60:
+            new_page()
+            max_h = start_y - bottom_limit - caption_h - IMAGE_CAPTION_GAP
 
-        min_img_h = 80
-        needed_min = min_img_h + caption_h + 16
-        if start_y - needed_min < bottom_limit:
-            c.showPage()
-            start_y = on_new_page(c)
+        blocks.append({
+            "path": items[0]["path"],
+            "x": img_x,
+            "y_top": start_y,
+            "w": img_w,
+            "h": max_h,
+            "fit": "contain",
+            "label": None
+        })
 
-        available_h_for_image = start_y - (bottom_limit + caption_h + 16)
-        if available_h_for_image < 40:
-            available_h_for_image = 40
+    # ---------------------------
+    # TEMPLATE 2 — 2×2 grid (adaptive per layout)
+    # ---------------------------
+    elif layout == "template2":
+        grid_w = usable_w * width_pct
+        cell = (grid_w - gap) / 2
+        aspect_ratios = [Image.open(item["path"]).height / Image.open(item["path"]).width for item in items]
+        extreme_aspect_ratio = max(aspect_ratios)
+        cell_height = cell * extreme_aspect_ratio
+        preferred_h = (cell_height * 2) + gap
+        available_h = start_y - bottom_limit - caption_h - IMAGE_CAPTION_GAP
 
-        # Choose loading strategy based on flag
-        flatten_flag = images_spec.get("flatten_alpha_to_white", False)
+        layout_scale = min(1.0, available_h / preferred_h)
+        if layout_scale < MIN_SCALE:
+            new_page()
+            layout_scale = 1.0
 
-        try:
-            if flatten_flag:
-                pil = _load_image_flatten_white(img_path)
-            else:
-                pil = Image.open(img_path).convert("RGB")
+        grid_w *= layout_scale
+        cell *= layout_scale
+        cell_height *= layout_scale
 
-            w0, h0 = pil.size
-            scale = img_w / w0
-            img_h = h0 * scale
-            if img_h > available_h_for_image:
-                scale = available_h_for_image / h0
-                img_h = available_h_for_image
-                img_w = w0 * scale
-                img_x = left_x + (usable_w - img_w) / 2
-
-            fitted = _cover_crop(pil, int(img_w), int(img_h))
-            reader = _pil_to_reader(fitted)
-        except Exception:
-            return start_y, False
-
-        c.drawImage(reader, img_x, start_y - img_h, width=img_w, height=img_h)
-
-        # _draw_overlay_letter(
-        #     c,
-        #     "a",
-        #     img_x + 6,
-        #     start_y - 6,
-        #     font_size=10,
-        #     color="white" if overlay_color == "white" else "black"
-        # )
-
-        y = start_y - img_h - 8
-
-        if caption_final:
-            c.setFillColor(colors.HexColor("#111827"))
-            caption_font = "Helvetica-Oblique"
-            caption_size = 10
-            line_spacing = 12
-
-            usable_w2 = (page_w - right_margin_mm * mm) - (left_margin_mm * mm)
-
-            # wrap caption into multiple lines
-            lines = _wrap_text(c, caption_final, caption_font, caption_size, usable_w2)
-
-            c.setFont(caption_font, caption_size)
-            current_y = y - line_spacing
-
-            if len(lines) == 1:
-                # ---- single line → center ----
-                line = lines[0]
-                text_w = c.stringWidth(line, caption_font, caption_size)
-                caption_x = left_x + (usable_w2 - text_w) / 2
-                c.drawString(caption_x, current_y, line)
-                current_y -= line_spacing
-            else:
-                # ---- multiple lines → left align ----
-                caption_x = left_x
-                for line in lines:
-                    c.drawString(caption_x, current_y, line)
-                    current_y -= line_spacing
-
-            # extra gap after caption
-            y = current_y - 35
-
-
-
-
-
-            return y, True
-
-
-
-    # ------------------------------------------------------------
-    # TEMPLATE 2: 2x2 grid (a b / c d)
-    # ------------------------------------------------------------
-    if images_spec.get("layout") == "template2":
-        items = images_spec.get("items") or []
-        if len(items) < 4:
-            return start_y, False  # need exactly 4 images
-        overlay_color = images_spec.get("overlay_color", "white")
-        flatten_flag = images_spec.get("flatten_alpha_to_white", False)
-        width_pct_local = max(0.1, min(images_spec.get("width_pct", width_pct), 1.0))
-
-        caption_user = images_spec.get("caption", "").strip()
-        if figure_number is not None:
-            caption_final = f"Figure {figure_number}: {caption_user}" if caption_user else f"Figure {figure_number}"
-        else:
-            caption_final = caption_user
-        caption_h = 12 if caption_final else 0
-
-        left_x = left_margin_mm * mm
-        right_x = page_w - right_margin_mm * mm
-        usable_w = right_x - left_x
-
-        grid_w = usable_w * width_pct_local
         grid_x = left_x + (usable_w - grid_w) / 2
 
-        gap = 8  # horizontal & vertical gap
-        cell_w = (grid_w - gap) / 2
-        cell_h = cell_w 
+        labels = ["a", "b", "c", "d"]
+        for r in range(2):
+            for c_i in range(2):
+                i = r * 2 + c_i
+                blocks.append({
+                    "path": items[i]["path"],
+                    "x": grid_x + c_i * (cell + gap),
+                    "y_top": start_y - r * (cell_height + gap),
+                    "w": cell,
+                    "h": cell_height,
+                    "fit": "cover",
+                    "label": labels[i]
+                })
 
-        # Load images and compute a common height so the grid is nice and even
-        # ==== NEW: load each image and stretch to exact cell size (no cropping, no borders) ====
-        readers = []
-        for i in range(4):
-            p = items[i].get("path")
-            if not p or not os.path.exists(p):
-                return start_y, False
-            try:
-                pil = _load_image_flatten_white(p) if flatten_flag else Image.open(p).convert("RGB")
-            except Exception:
-                return start_y, False
+    # ---------------------------
+    # TEMPLATE 3 — composite (adaptive per layout)
+    # ---------------------------
+    elif layout == "template3":
+        grid_w = usable_w * width_pct
+        w_a = (grid_w - gap) / 3
+        w_b = grid_w - gap - w_a
+        h = w_a
 
-            # Stretch directly to the grid cell dimensions (may slightly distort)
-            # resized = pil.resize((int(cell_w), int(cell_h)), Image.LANCZOS)
-            # readers.append(_pil_to_reader(resized))
-            fitted = _cover_crop(pil, int(cell_w), int(cell_h))
-            readers.append(_pil_to_reader(fitted))
+        preferred_h = h * 2 + gap
+        available_h = start_y - bottom_limit - caption_h - IMAGE_CAPTION_GAP
 
-      
+        layout_scale = min(1.0, available_h / preferred_h)
+        if layout_scale < MIN_SCALE:
+            new_page()
+            layout_scale = 1.0
 
-        # Both rows have the same height now
-        row1_h = cell_h
-        row2_h = cell_h
-        needed = row1_h + gap + row2_h + 8 + caption_h + 16  # total vertical space
+        grid_w *= layout_scale
+        w_a *= layout_scale
+        w_b *= layout_scale
+        h *= layout_scale
+        gap *= layout_scale
 
-
-
-        bottom_limit = margins["bottom_mm"] * mm + min_bottom_gap_pt
-
-        if start_y - needed < bottom_limit:
-            c.showPage()
-            start_y = on_new_page(c)
-
-        # Draw row 1 (a, b)
-        x_a = grid_x
-        x_b = grid_x + cell_w + gap
-        y_top = start_y
-        c.drawImage(readers[0], x_a, y_top - cell_h, width=cell_w, height=cell_h)
-        c.drawImage(readers[1], x_b, y_top - cell_h, width=cell_w, height=cell_h)
-
-        _draw_overlay_letter(c, "a", x_a + 6, y_top - 6,
-                             font_size=10,
-                             color="white" if overlay_color == "white" else "black")
-        _draw_overlay_letter(c, "b", x_b + 6, y_top - 6,
-                             font_size=10,
-                             color="white" if overlay_color == "white" else "black")
-
-        # Row 2 (c, d)
-        y_row2_top = y_top - row1_h - gap
-        c.drawImage(readers[2], x_a, y_row2_top - cell_h, width=cell_w, height=cell_h)
-        c.drawImage(readers[3], x_b, y_row2_top - cell_h, width=cell_w, height=cell_h)
-
-        _draw_overlay_letter(c, "c", x_a + 6, y_row2_top - 6,
-                             font_size=10,
-                             color="white" if overlay_color == "white" else "black")
-        _draw_overlay_letter(c, "d", x_b + 6, y_row2_top - 6,
-                             font_size=10,
-                             color="white" if overlay_color == "white" else "black")
-
-        y_after = y_row2_top - cell_h - 8
-
-        # Centered caption (optional)
-        if caption_final:
-            c.setFillColor(colors.HexColor("#111827"))
-            caption_font = "Helvetica-Oblique"
-            caption_size = 10
-            line_spacing = 12
-
-            # wrap caption into multiple lines (use full usable_w)
-            lines = _wrap_text(c, caption_final, caption_font, caption_size, usable_w)
-
-            c.setFont(caption_font, caption_size)
-            current_y = y_after - line_spacing
-
-            if len(lines) == 1:
-                # ---- single line → center ----
-                line = lines[0]
-                text_w = c.stringWidth(line, caption_font, caption_size)
-                caption_x = left_x + (usable_w - text_w) / 2
-                c.drawString(caption_x, current_y, line)
-                current_y -= line_spacing
-            else:
-                # ---- multiple lines → left align ----
-                caption_x = left_x
-                for line in lines:
-                    c.drawString(caption_x, current_y, line)
-                    current_y -= line_spacing
-
-            # extra gap after caption
-            y_after = current_y - 35
-
-        return y_after, True
-    
-    # ------------------------------------------------------------
-    # TEMPLATE 3: 1/3 + 2/3 top, full-width bottom (a | b / c)
-    # ------------------------------------------------------------
-    if images_spec.get("layout") == "template3":
-        items = images_spec.get("items") or []
-        if len(items) < 3:
-            return start_y, False  # need exactly 3 images
-
-        overlay_color = images_spec.get("overlay_color", "white")
-        flatten_flag = images_spec.get("flatten_alpha_to_white", False)
-        width_pct_local = max(0.1, min(images_spec.get("width_pct", width_pct), 1.0))
-
-        caption_user = images_spec.get("caption", "").strip()
-        if figure_number is not None:
-            caption_final = f"Figure {figure_number}: {caption_user}" if caption_user else f"Figure {figure_number}"
-        else:
-            caption_final = caption_user
-        caption_h = 12 if caption_final else 0
-
-        # --- Geometry ---
-        left_x = left_margin_mm * mm
-        right_x = page_w - right_margin_mm * mm
-        usable_w = right_x - left_x
-
-        grid_w = usable_w * width_pct_local
         grid_x = left_x + (usable_w - grid_w) / 2
 
-        gap = 8
+        blocks.extend([
+            {
+                "path": items[0]["path"],
+                "x": grid_x,
+                "y_top": start_y,
+                "w": w_a,
+                "h": h,
+                "fit": "cover",
+                "label": "a"
+            },
+            {
+                "path": items[1]["path"],
+                "x": grid_x + w_a + gap,
+                "y_top": start_y,
+                "w": w_b,
+                "h": h,
+                "fit": "cover",
+                "label": "b"
+            },
+            {
+                "path": items[2]["path"],
+                "x": grid_x,
+                "y_top": start_y - h - gap,
+                "w": grid_w,
+                "h": h,
+                "fit": "cover",
+                "label": "c"
+            }
+        ])
 
-        w_a = (grid_w - gap) * (1/3)
-        w_b = (grid_w - gap) * (2/3)
+    else:
+        return start_y, False
 
-        h_top = w_a  # square
-        h_bottom = h_top #* 0.6
+    # ---------------------------
+    # Draw images (no adaptive logic here)
+    # ---------------------------
+    y_min = start_y
 
-        needed = h_top + gap + h_bottom + 8 + caption_h + 16
-        bottom_limit = margins["bottom_mm"] * mm + min_bottom_gap_pt
+    for b in blocks:
+        img = Image.open(b["path"]).convert("RGB")
+        px_w = int(b["w"] * dpi / 72)
+        px_h = int(b["h"] * dpi / 72)
 
-        if start_y - needed < bottom_limit:
-            c.showPage()
-            start_y = on_new_page(c)
+        if b["fit"] == "cover":
+            img = _cover_crop(img, px_w, px_h)
+        else:
+            w0, h0 = img.size
+            scale = px_w / w0
+            img = img.resize((px_w, int(h0 * scale)), Image.LANCZOS)
 
-        # --- Load images ---
-        readers = []
-        for i in range(3):
-            p = items[i].get("path")
-            if not p or not os.path.exists(p):
-                return start_y, False
-            try:
-                pil = _load_image_flatten_white(p) if flatten_flag else Image.open(p).convert("RGB")
-                if i == 0:
-                    fitted = _cover_crop(pil, int(w_a), int(h_top))
-                elif i == 1:
-                    fitted = _cover_crop(pil, int(w_b), int(h_top))
-                else:
-                    fitted = _cover_crop(pil, int(grid_w), int(h_bottom))
-                readers.append(_pil_to_reader(fitted))
-            except Exception:
-                return start_y, False
+        reader = _pil_to_reader(img)
+        draw_w = img.size[0] * 72 / dpi
+        draw_h = img.size[1] * 72 / dpi
+        x_draw = b["x"] + (b["w"] - draw_w) / 2
 
-        # --- Draw top row ---
-        x_a = grid_x
-        x_b = grid_x + w_a + gap
-        y_top = start_y
+        c.drawImage(reader, x_draw, b["y_top"] - draw_h, width=draw_w, height=draw_h)
 
-        c.drawImage(readers[0], x_a, y_top - h_top, width=w_a, height=h_top)
-        c.drawImage(readers[1], x_b, y_top - h_top, width=w_b, height=h_top)
+        if b["label"]:
+            _draw_overlay_letter(c, b["label"], b["x"] + 6, b["y_top"] - 6)
 
-        _draw_overlay_letter(c, "a", x_a + 6, y_top - 6,
-                             font_size=10,
-                             color="white" if overlay_color == "white" else "black")
-        _draw_overlay_letter(c, "b", x_b + 6, y_top - 6,
-                             font_size=10,
-                             color="white" if overlay_color == "white" else "black")
+        y_min = min(y_min, b["y_top"] - draw_h)
 
-        # --- Draw bottom image ---
-        y_bottom_top = y_top - h_top - gap
-        c.drawImage(readers[2], grid_x, y_bottom_top - h_bottom,
-                    width=grid_w, height=h_bottom)
+    # ---------------------------
+    # Caption
+    # ---------------------------
+    y = y_min - IMAGE_CAPTION_GAP
+    if caption_final:
+        c.setFont("Helvetica-Oblique", 10)
+        lines = _wrap_text(c, caption_final, "Helvetica-Oblique", 10, usable_w)
+        if len(lines) == 1:
+            line = lines[0]
+            text_w = c.stringWidth(line, "Helvetica-Oblique", 10)
+            caption_x = left_x + (usable_w - text_w) / 2
+            c.drawString(caption_x, y, line)
+            y -= 12 
+        else:
+            caption_x = left_x
+            for line in lines:
+                c.drawString(caption_x, y, line)
+                y -= 12
+        y -= 20
 
-        _draw_overlay_letter(c, "c", grid_x + 6, y_bottom_top - 6,
-                             font_size=10,
-                             color="white" if overlay_color == "white" else "black")
+        # for line in _wrap_text(c, caption_final, "Helvetica-Oblique", 10, usable_w):
+        #     text_w = c.stringWidth(line, "Helvetica-Oblique", 10)
+        #     c.drawString(left_x + (usable_w - text_w) / 2, y, line)
+        #     y -= 12
+        # y -= 20
 
-        y_after = y_bottom_top - h_bottom - 12
+    return y, True
 
-        # --- Caption ---
-        if caption_final:
+def _draw_lidt_table(c, page_w, left_margin_mm, right_margin_mm, y, lidt_table, sample="", table_number=1):
+    left_x   = left_margin_mm * mm
+    right_x  = page_w - right_margin_mm * mm
+    usable_w = right_x - left_x
+    show_50  = lidt_table.get("show_50_pct", True)
+
+    if show_50:
+        headers = [
+            "Number of\npulses",
+            "0% LIDT\n[J/cm\u00b2]",
+            "50% LIDT\n[J/cm\u00b2]",
+            "First observed\ndamage [J/cm\u00b2]",
+        ]
+        col_ws   = [usable_w * w for w in [0.22, 0.26, 0.26, 0.26]]
+        row_vals = [
+            str(lidt_table.get("n_pulses",     "")),
+            str(lidt_table.get("lidt_0",       "")),
+            str(lidt_table.get("lidt_50",      "")),
+            str(lidt_table.get("first_damage", "")),
+        ]
+    else:
+        headers = [
+            "Number of\npulses",
+            "0% LIDT\n[J/cm\u00b2]",
+            "First observed\ndamage [J/cm\u00b2]",
+        ]
+        col_ws   = [usable_w * w for w in [0.28, 0.36, 0.36]]
+        row_vals = [
+            str(lidt_table.get("n_pulses",     "")),
+            str(lidt_table.get("lidt_0",       "")),
+            str(lidt_table.get("first_damage", "")),
+        ]
+
+    hdr_h      = 34
+    row_h      = 20
+    font_size  = 9
+    border_col = colors.HexColor("#D1D5DB")
+
+    x = left_x
+    for header, col_w in zip(headers, col_ws):
+        c.setFillColor(colors.HexColor("#F3F4F6"))
+        c.setStrokeColor(border_col)
+        c.rect(x, y - hdr_h, col_w, hdr_h, stroke=1, fill=1)
+        c.setFillColor(colors.HexColor("#111827"))
+        lines   = header.split("\n")
+        total_h = len(lines) * (font_size + 2)
+        text_y  = y - (hdr_h - total_h) / 2 - font_size
+        for line in lines:
+            c.setFont("Helvetica-Bold", font_size)
+            tw = c.stringWidth(line, "Helvetica-Bold", font_size)
+            c.drawString(x + (col_w - tw) / 2, text_y, line)
+            text_y -= font_size + 2
+        x += col_w
+    y -= hdr_h
+
+    x = left_x
+    for val, col_w in zip(row_vals, col_ws):
+        c.setFillColor(colors.white)
+        c.setStrokeColor(border_col)
+        c.rect(x, y - row_h, col_w, row_h, stroke=1, fill=1)
+        c.setFillColor(colors.HexColor("#111827"))
+        c.setFont("Helvetica", font_size)
+        tw = c.stringWidth(val, "Helvetica", font_size)
+        c.drawString(x + (col_w - tw) / 2, y - row_h / 2 - font_size / 2 + 1, val)
+        x += col_w
+    y -= row_h
+
+    y -= 20
+    caption = f"Table {table_number} - Extrapolated and measured values of LIDT, sample {sample}."
+    c.setFont("Helvetica-Oblique", 9)
+    c.setFillColor(colors.HexColor("#111827"))
+    cap_w = c.stringWidth(caption, "Helvetica-Oblique", 9)
+    c.drawString(left_x + (usable_w - cap_w) / 2, y, caption)
+    y -= 16
+
+    return y
+
+def _draw_ron1_table(c, page_w, left_margin_mm, right_margin_mm, y, spot_results, table_number=1):
+    left_x   = left_margin_mm * mm
+    right_x  = page_w - right_margin_mm * mm
+    usable_w = right_x - left_x
+    headers  = ["Spot no.", "Damage fluence [J/cm\u00b2]"]
+    col_ws   = [usable_w * 0.25, usable_w * 0.75]
+    hdr_h    = 24
+    row_h    = 20
+    fs       = 9
+    bc       = colors.HexColor("#D1D5DB")
+
+    x = left_x
+    for header, cw in zip(headers, col_ws):
+        c.setFillColor(colors.HexColor("#F3F4F6"))
+        c.setStrokeColor(bc)
+        c.rect(x, y - hdr_h, cw, hdr_h, stroke=1, fill=1)
+        c.setFillColor(colors.HexColor("#111827"))
+        c.setFont("Helvetica-Bold", fs)
+        tw = c.stringWidth(header, "Helvetica-Bold", fs)
+        c.drawString(x + (cw - tw) / 2, y - hdr_h / 2 - fs / 2 + 1, header)
+        x += cw
+    y -= hdr_h
+
+    for row in spot_results:
+        spot_no = str(row.get("spot", ""))
+        dmg     = row.get("damage_fluence")
+        dmg_str = f"{dmg:.1f}" if dmg is not None else "No damage observed"
+        x = left_x
+        for val, cw in zip([spot_no, dmg_str], col_ws):
+            c.setFillColor(colors.white)
+            c.setStrokeColor(bc)
+            c.rect(x, y - row_h, cw, row_h, stroke=1, fill=1)
             c.setFillColor(colors.HexColor("#111827"))
-            caption_font = "Helvetica-Oblique"
-            caption_size = 10
-            line_spacing = 12
+            c.setFont("Helvetica", fs)
+            tw = c.stringWidth(val, "Helvetica", fs)
+            c.drawString(x + (cw - tw) / 2, y - row_h / 2 - fs / 2 + 1, val)
+            x += cw
+        y -= row_h
 
-            lines = _wrap_text(c, caption_final, caption_font, caption_size, usable_w)
-            c.setFont(caption_font, caption_size)
+    y -= 16
+    caption = f"Table {table_number} - R-on-1 damage threshold per tested spot."
+    c.setFont("Helvetica-Oblique", 9)
+    c.setFillColor(colors.HexColor("#111827"))
+    cap_w = c.stringWidth(caption, "Helvetica-Oblique", 9)
+    c.drawString(left_x + (usable_w - cap_w) / 2, y, caption)
+    y -= 16
+    return y
 
-            current_y = y_after - line_spacing
-            if len(lines) == 1:
-                text_w = c.stringWidth(lines[0], caption_font, caption_size)
-                c.drawString(left_x + (usable_w - text_w) / 2, current_y, lines[0])
-                current_y -= line_spacing
-            else:
-                for line in lines:
-                    c.drawString(left_x, current_y, line)
-                    current_y -= line_spacing
+def _draw_raster_lidt_table(c, page_w, left_margin_mm, right_margin_mm, y, raster_lidt_table, table_number=1):
+    left_x   = left_margin_mm * mm
+    right_x  = page_w - right_margin_mm * mm
+    usable_w = right_x - left_x
+    headers  = [
+        "Number of\npulses",
+        "0% LIDT\n[J/cm\u00b2]",
+        "5% LIDT\n[J/cm\u00b2]",
+        "First observed\ndamage [J/cm\u00b2]",
+    ]
+    col_ws   = [usable_w * w for w in [0.22, 0.26, 0.26, 0.26]]
+    row_vals = [
+        str(raster_lidt_table.get("n_pulses",     "")),
+        str(raster_lidt_table.get("lidt_0",       "")),
+        str(raster_lidt_table.get("lidt_5",       "")),
+        str(raster_lidt_table.get("first_damage", "")),
+    ]
+    hdr_h     = 34
+    row_h     = 20
+    font_size = 9
+    bc        = colors.HexColor("#D1D5DB")
 
-            y_after = current_y - 35
+    x = left_x
+    for header, col_w in zip(headers, col_ws):
+        c.setFillColor(colors.HexColor("#F3F4F6"))
+        c.setStrokeColor(bc)
+        c.rect(x, y - hdr_h, col_w, hdr_h, stroke=1, fill=1)
+        c.setFillColor(colors.HexColor("#111827"))
+        lines   = header.split("\n")
+        total_h = len(lines) * (font_size + 2)
+        text_y  = y - (hdr_h - total_h) / 2 - font_size
+        for line in lines:
+            c.setFont("Helvetica-Bold", font_size)
+            tw = c.stringWidth(line, "Helvetica-Bold", font_size)
+            c.drawString(x + (col_w - tw) / 2, text_y, line)
+            text_y -= font_size + 2
+        x += col_w
+    y -= hdr_h
 
-        return y_after, True
+    x = left_x
+    for val, col_w in zip(row_vals, col_ws):
+        c.setFillColor(colors.white)
+        c.setStrokeColor(bc)
+        c.rect(x, y - row_h, col_w, row_h, stroke=1, fill=1)
+        c.setFillColor(colors.HexColor("#111827"))
+        c.setFont("Helvetica", font_size)
+        tw = c.stringWidth(val, "Helvetica", font_size)
+        c.drawString(x + (col_w - tw) / 2, y - row_h / 2 - font_size / 2 + 1, val)
+        x += col_w
+    y -= row_h
 
-    # ------------------------------------------------------------
-    # FUTURE TEMPLATES (placeholders – do nothing yet)
-    # ------------------------------------------------------------
-    # if layout == "template2":
-    #     # Two side-by-side images (a, b)
-    #     return start_y
-    #
-    # if layout == "template3":
-    #     # Tall-left (a tall image + two stacked)
-    #     return start_y
-    #
-    # if layout == "template4":
-    #     # Tall-right (mirror)
-    #     return start_y
-    #
-    # if layout == "template5":
-    #     # Quad 2x2 (a, b, c, d)
-    #     return start_y
-    #
-    # if layout == "template6":
-    #     # Big-top + two bottom
-    #     return start_y
-
-    # Unknown layout name
-    return start_y
-
+    y -= 20
+    sample  = raster_lidt_table.get("sample", "")
+    caption = f"Table {table_number} - Extrapolated and measured values of LIDT, sample {sample}."
+    c.setFont("Helvetica-Oblique", 9)
+    c.setFillColor(colors.HexColor("#111827"))
+    cap_w = c.stringWidth(caption, "Helvetica-Oblique", 9)
+    c.drawString(left_x + (usable_w - cap_w) / 2, y, caption)
+    y -= 16
+    return y
 
 def render_sections_split_simple(
     c,
@@ -583,21 +707,33 @@ def render_sections_split_simple(
         right_x = page_w - right_margin_mm * mm
         rule_width = int(right_x - left_x)
 
+        # Force page break if section requests it (e.g. Annex)
+        if sec.get("page_break_before"):
+            c.showPage()
+            y = on_new_page(c)
         # Ensure space for header + one item; otherwise page-break first
         header_h = title_font_size + title_to_rule_gap + rule_height_pt + rule_to_items_gap
-        if y - (header_h + line_spacing) < bottom_limit:
+        images_spec = sec.get("images")
+        min_content = 150 if (images_spec and images_spec.get("items") and not items) else line_spacing
+        if y - (header_h + min_content) < bottom_limit:
             c.showPage()
             y = on_new_page(c)
 
         # Title
-        c.setFillColor(colors.HexColor("#00afee"))
-        c.setFillColor(colors.HexColor("#00afee"))
+        #0a714e
+        # c.setFillColor(colors.HexColor("#00afee"))
+        # c.setFillColor(colors.HexColor("#00afee"))
+
+        c.setFillColor(colors.HexColor("#0a714e"))
+        c.setFillColor(colors.HexColor("#0a714e"))
         c.setFont(title_font, title_font_size)
         c.drawString(left_x, y, f"{idx}. {title}")
 
         # Rule
         rule_y = y - title_to_rule_gap
-        c.setFillColor(colors.HexColor("#00afee"))
+        #0a714e
+        #c.setFillColor(colors.HexColor("#00afee"))
+        c.setFillColor(colors.HexColor("#0a714e"))
         c.rect(left_x, rule_y, rule_width, rule_height_pt, stroke=0, fill=1)
 
         # Items start position
@@ -650,9 +786,77 @@ def render_sections_split_simple(
                 min_bottom_gap_pt=min_bottom_gap_pt,
                 figure_number=fig_counter + 1  # pass next figure number
             )
-            if drawn:
-                fig_counter += 1
+            
+            fig_counter += drawn
 
+        # Optional LIDT table
+        lidt_table_data = sec.get("lidt_table")
+        if lidt_table_data:
+            table_h_needed = 34 + 20 + 30  # header + data row + caption + gap
+            if y - table_h_needed < bottom_limit:
+                c.showPage()
+                y = on_new_page(c)
+            y = _draw_lidt_table(
+                c             = c,
+                page_w        = page_w,
+                left_margin_mm  = left_margin_mm,
+                right_margin_mm = right_margin_mm,
+                y             = y,
+                lidt_table    = lidt_table_data,
+                sample        = lidt_table_data.get("sample", ""),
+                table_number  = lidt_table_data.get("table_number", 1),
+            )
+        # R-on-1 spot plots
+        ron1_spots = sec.get("ron1_spots")
+        if ron1_spots:
+            y, drawn = _draw_image_template(
+                c               = c,
+                images_spec     = {"layout": "stack", "items": ron1_spots},
+                start_y         = y,
+                page_w          = page_w,
+                page_h          = page_h,
+                margins         = margins,
+                on_new_page     = on_new_page,
+                left_margin_mm  = left_margin_mm,
+                right_margin_mm = right_margin_mm,
+                min_bottom_gap_pt = min_bottom_gap_pt,
+                figure_number   = fig_counter + 1,
+            )
+            fig_counter += drawn
+
+        # R-on-1 results table
+        ron1_table = sec.get("ron1_table")
+        if ron1_table:
+            n_rows = len(ron1_table.get("spot_results", []))
+            needed = 24 + n_rows * 20 + 32
+            if y - needed < bottom_limit:
+                c.showPage()
+                y = on_new_page(c)
+            y = _draw_ron1_table(
+                c               = c,
+                page_w          = page_w,
+                left_margin_mm  = left_margin_mm,
+                right_margin_mm = right_margin_mm,
+                y               = y,
+                spot_results    = ron1_table.get("spot_results", []),
+                table_number    = ron1_table.get("table_number", 1),
+            )
+        # Raster scan LIDT table
+        raster_lidt_table = sec.get("raster_lidt_table")
+        if raster_lidt_table:
+            needed = 34 + 20 + 36
+            if y - needed < bottom_limit:
+                c.showPage()
+                y = on_new_page(c)
+            y = _draw_raster_lidt_table(
+                c               = c,
+                page_w          = page_w,
+                left_margin_mm  = left_margin_mm,
+                right_margin_mm = right_margin_mm,
+                y               = y,
+                raster_lidt_table = raster_lidt_table,
+                table_number    = raster_lidt_table.get("table_number", 1),
+            )
         # Optional notes AFTER images
         notes_text = sec.get("notes")
         if notes_text:
@@ -741,10 +945,19 @@ def generate_report(context: dict, output_path: str = "report.pdf"):
     c.drawImage(_pil_to_reader(banner), 0, banner_y, width=banner_w, height=banner_h)
 
     # --- Title-page SVG logo (white)
+    # if os.path.exists(context["logo_title"]):
+    #     logo_target_h = 48  
+    #     logo_x = 16 * mm
+    #     logo_y = banner_y + banner_h - 30 * mm  # baseline
+    #     _draw_svg(c, context["logo_title"], logo_x, logo_y, logo_target_h)
+    # --- Title-page SVG logo (white, bigger + centered)
     if os.path.exists(context["logo_title"]):
-        logo_target_h = 48  
-        logo_x = 16 * mm
-        logo_y = banner_y + banner_h - 30 * mm  # baseline
+        logo_target_h = 80
+        _tmp_svg = svg2rlg(context["logo_title"])
+        _logo_scale = logo_target_h / _tmp_svg.height
+        _logo_w = _tmp_svg.width * _logo_scale
+        logo_x = (PAGE_W - _logo_w) / 2
+        logo_y = banner_y + banner_h - 42 * mm
         _draw_svg(c, context["logo_title"], logo_x, logo_y, logo_target_h)
 
     # --- Title ( "{title} {sample}")
@@ -756,7 +969,11 @@ def generate_report(context: dict, output_path: str = "report.pdf"):
     wrap_width = max(1, int(max_width / approx_char_w))
     lines = wrap(title_txt, width=wrap_width)
 
-    start_y = banner_y + 35*mm + (len(lines) - 1) * 6
+    #start_y = banner_y + 35*mm + (len(lines) - 1) * 6
+    _logo_base    = banner_y + banner_h - 42 * mm   # same as logo_y above
+    _subtitle_top = banner_y + 22 * mm
+    _mid          = (_logo_base + _subtitle_top) / 2
+    start_y       = _mid + (len(lines) - 1) * font_size * 0.55
     c.setFont(font_name, font_size)
     for i, line in enumerate(lines):
         line_w = c.stringWidth(line, font_name, font_size)
@@ -806,7 +1023,9 @@ def generate_report(context: dict, output_path: str = "report.pdf"):
         nonlocal current_y
 
         c.setFont("Helvetica-Bold", 14)
-        c.setFillColor(colors.HexColor("#00afee"))
+        #c.setFillColor(colors.HexColor("#00afee"))
+        c.setFillColor(colors.HexColor("#0a714e"))
+        
         c.drawString(block_x, current_y - 2, title_txt)
 
         y = current_y - 8 * mm
@@ -901,8 +1120,8 @@ def generate_report(context: dict, output_path: str = "report.pdf"):
 
     # --- Second page header/footer using SVG
     m = context["margins"]
-    header_h_pt = 45
-    logo_h_pt = 25
+    header_h_pt = 55
+    logo_h_pt = 40
 
     _draw_header_footer_svg_ombre(
     c, PAGE_W, PAGE_H,

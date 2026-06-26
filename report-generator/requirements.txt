@@ -1,0 +1,11 @@
+streamlit
+matplotlib
+pandas
+numpy
+scipy
+bcrypt
+reportlab
+Pillow
+svglib
+hexalattice
+openpyxl
