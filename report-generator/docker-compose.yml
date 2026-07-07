@@ -35,7 +35,7 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data:Z
       - ./app:/app/app
       - ./assets:/app/assets
       - ./configs:/app/configs

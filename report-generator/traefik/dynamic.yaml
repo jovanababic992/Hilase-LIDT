@@ -1,0 +1,21 @@
+# Traefik Dynamic Configuration
+# Routes and services
+# Note: This file uses Go/Sprig templates (supported by Traefik file provider)
+
+http:
+  routers:
+    hilase:
+      rule: "Host(`{{ env "ACME_DOMAIN" }}`) || PathPrefix(`/`)"
+      entryPoints:
+        - websecure
+      service: hilase
+      tls:
+        certResolver: letsencrypt
+        domains:
+          - main: "{{ env "ACME_DOMAIN" }}"
+
+  services:
+    hilase:
+      loadBalancer:
+        servers:
+          - url: "http://app:8501"
